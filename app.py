@@ -24,14 +24,14 @@ AUTO_FORCE_GRAY_FOR_ROBUST = True
 
 MODEL_CONFIGS = {
     "standard": {
-        "label": "Standard EfficientNet (Color)",
-        "path": os.path.join(BASE_DIR, "food_efficientnet_b0.keras"),
-        "note": "Baseline color model."
+        "label": "EfficientNet-B3 (Color)",
+        "path": os.path.join(BASE_DIR, "food_efficientnet_b3.keras"),
+        "note": "Latest B3 color model."
     },
     "grayscale_robust": {
-        "label": "Grayscale-Robust EfficientNet",
-        "path": os.path.join(BASE_DIR, "food_efficientnet_b0_grayscale_robust.keras"),
-        "note": "Trained with grayscale augmentation."
+        "label": "EfficientNet-B3 Grayscale-Robust",
+        "path": os.path.join(BASE_DIR, "food_efficientnet_b3_grayscale_robust.keras"),
+        "note": "B3 model trained with grayscale augmentation."
     }
 }
 
@@ -187,8 +187,8 @@ def build_demo():
     load_class_names()
     with gr.Blocks(theme="soft") as demo:
         gr.Markdown(
-            "# 🍜 Chinese Food Classifier (Dual Models)\n"
-            "Switch between the standard and grayscale-robust models. "
+            "# 🍜 Chinese Food Classifier (B3 Models)\n"
+            "Switch between the standard and grayscale-robust EfficientNet-B3 models. "
             "You can manually force grayscale or rely on auto-application for the robust model."
         )
         with gr.Row():
