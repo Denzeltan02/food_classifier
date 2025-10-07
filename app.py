@@ -8,6 +8,7 @@ import threading
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+from tensorflow.keras.layers import Layer
 from PIL import Image
 import gradio as gr
 
@@ -20,17 +21,17 @@ INTERMEDIATE_RESIZE = 256
 DEFAULT_TOPK = 5
 
 # Auto-force grayscale when using grayscale_robust model (even if user box unchecked)
-AUTO_FORCE_GRAY_FOR_ROBUST = True
+AUTO_FORCE_GRAY_FOR_ROBUST = False
 
 MODEL_CONFIGS = {
     "standard": {
         "label": "EfficientNet-B3 (Color)",
-        "path": os.path.join(BASE_DIR, "food_efficientnet_b3.keras"),
+        "path": os.path.join(BASE_DIR, "food_efficientnet_b3.tf"),
         "note": "Latest B3 color model."
     },
     "grayscale_robust": {
         "label": "EfficientNet-B3 Grayscale-Robust",
-        "path": os.path.join(BASE_DIR, "food_efficientnet_b3_grayscale_robust.keras"),
+        "path": os.path.join(BASE_DIR, "food_efficientnet_b3_grayscale_robust_tf"),
         "note": "B3 model trained with grayscale augmentation."
     }
 }
@@ -73,20 +74,44 @@ def load_model(key: str):
         raise ValueError(f"Unknown model key '{key}'")
     if key in _model_cache:
         return _model_cache[key]
+
     with _load_lock:
         if key in _model_cache:
             return _model_cache[key]
+
         cfg = MODEL_CONFIGS[key]
         path = cfg["path"]
         if not os.path.exists(path):
-            raise FileNotFoundError(f"Model file '{path}' not found.")
-        model = keras.models.load_model(
-            path,
-            compile=False,
-            custom_objects={"RandomGrayscale": RandomGrayscale}
-        )
+            raise FileNotFoundError(f"Model folder '{path}' not found.")
+
+        try:
+            # Try loading as Keras model first (has keras metadata)
+            model = keras.models.load_model(path, compile=False)
+            print(f"[INFO] Loaded Keras model '{key}' from {path}")
+        except ValueError as e:
+            # If Keras metadata missing, fall back to tf.saved_model.load
+            print(f"[WARN] Keras metadata missing for '{key}', using tf.saved_model.load instead.")
+            imported = tf.saved_model.load(path)
+
+            # Wrap into a callable object to mimic Keras model
+            class TFModelWrapper:
+                def __init__(self, imported):
+                    self.model = imported
+                    # Try to infer input shape from signature
+                    self.inputs = [tf.TensorSpec(shape=[None] + list(imported.signatures['serving_default'].inputs[0].shape[1:]), dtype=tf.float32)]
+                    self.outputs = [tf.TensorSpec(shape=[None] + list(imported.signatures['serving_default'].outputs[0].shape[1:]), dtype=tf.float32)]
+                    self._func = imported.signatures['serving_default']
+
+                def __call__(self, x, training=False):
+                    # Ensure input is a tensor
+                    if not isinstance(x, tf.Tensor):
+                        x = tf.convert_to_tensor(x, dtype=tf.float32)
+                    return self._func(x)['dense']
+
+            model = TFModelWrapper(imported)
+            print(f"[INFO] Loaded TF SavedModel '{key}' from {path} (no Keras metadata)")
+
         _model_cache[key] = model
-        print(f"[INFO] Loaded model '{key}' from {path} | In: {model.inputs[0].shape} Out: {model.outputs[0].shape}")
         return model
 
 # --------------------------------------------------
@@ -132,7 +157,7 @@ def predict(image: Image.Image, model_key: str, top_k: int, user_force_gray: boo
     force_gray_effective = user_force_gray or (AUTO_FORCE_GRAY_FOR_ROBUST and model_key == "grayscale_robust")
 
     batch = preprocess_image(image, model, force_gray_effective)
-    probs = model.predict(batch, verbose=0)[0]
+    probs = model(batch, training=False)[0].numpy()
 
     top_k = max(1, min(top_k, len(class_names)))
     idxs = np.argsort(probs)[::-1][:top_k]
@@ -221,12 +246,11 @@ def build_demo():
             label="Top-K Predictions"
         )
         label_out = gr.Label(label="(Mapping of Top-K)")
-        bar_out = gr.Plot(label="Probability Bar Chart")
 
         predict_btn.click(
             fn=gr_predict,
             inputs=[image_in, model_choice, topk_in, force_gray],
-            outputs=[preds_df, label_out, bar_out, status_box]
+            outputs=[preds_df, label_out, status_box]
         )
 
         gr.Markdown(
