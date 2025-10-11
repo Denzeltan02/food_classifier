@@ -1,7 +1,5 @@
 import os
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-# Optional quieter logs:
-# os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 import json
 import threading
@@ -12,15 +10,11 @@ from tensorflow.keras.layers import Layer
 from PIL import Image
 import gradio as gr
 
-# --------------------------------------------------
-# Configuration
-# --------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CLASSMAP_JSON = os.path.join(BASE_DIR, "class_names.json")
 INTERMEDIATE_RESIZE = 256
 DEFAULT_TOPK = 5
 
-# Auto-force grayscale when using grayscale_robust model (even if user box unchecked)
 AUTO_FORCE_GRAY_FOR_ROBUST = False
 
 MODEL_CONFIGS = {
@@ -36,9 +30,6 @@ MODEL_CONFIGS = {
     }
 }
 
-# --------------------------------------------------
-# Stub for RandomGrayscale (identity)
-# --------------------------------------------------
 @keras.saving.register_keras_serializable(package="custom")
 class RandomGrayscale(keras.layers.Layer):
     def __init__(self, p=0.2, prob=None, **kwargs):
@@ -53,9 +44,6 @@ class RandomGrayscale(keras.layers.Layer):
         cfg["p"] = self.p
         return cfg
 
-# --------------------------------------------------
-# Caches
-# --------------------------------------------------
 _model_cache = {}
 _class_names = None
 _load_lock = threading.Lock()
@@ -85,25 +73,20 @@ def load_model(key: str):
             raise FileNotFoundError(f"Model folder '{path}' not found.")
 
         try:
-            # Try loading as Keras model first (has keras metadata)
             model = keras.models.load_model(path, compile=False)
             print(f"[INFO] Loaded Keras model '{key}' from {path}")
         except ValueError as e:
-            # If Keras metadata missing, fall back to tf.saved_model.load
             print(f"[WARN] Keras metadata missing for '{key}', using tf.saved_model.load instead.")
             imported = tf.saved_model.load(path)
 
-            # Wrap into a callable object to mimic Keras model
             class TFModelWrapper:
                 def __init__(self, imported):
                     self.model = imported
-                    # Try to infer input shape from signature
                     self.inputs = [tf.TensorSpec(shape=[None] + list(imported.signatures['serving_default'].inputs[0].shape[1:]), dtype=tf.float32)]
                     self.outputs = [tf.TensorSpec(shape=[None] + list(imported.signatures['serving_default'].outputs[0].shape[1:]), dtype=tf.float32)]
                     self._func = imported.signatures['serving_default']
 
                 def __call__(self, x, training=False):
-                    # Ensure input is a tensor
                     if not isinstance(x, tf.Tensor):
                         x = tf.convert_to_tensor(x, dtype=tf.float32)
                     return self._func(x)['dense']
@@ -114,15 +97,11 @@ def load_model(key: str):
         _model_cache[key] = model
         return model
 
-# --------------------------------------------------
-# Preprocessing
-# --------------------------------------------------
 def preprocess_image(pil_img: Image.Image, model, force_gray_effective: bool) -> np.ndarray:
     if pil_img.mode != "RGB":
         pil_img = pil_img.convert("RGB")
 
     if force_gray_effective:
-        # Convert to grayscale then back to RGB triplet
         g = pil_img.convert("L")
         pil_img = Image.merge("RGB", (g, g, g))
 
@@ -146,14 +125,11 @@ def preprocess_image(pil_img: Image.Image, model, force_gray_effective: bool) ->
     arr = keras.applications.efficientnet.preprocess_input(arr)
     return arr
 
-# --------------------------------------------------
-# Prediction
-# --------------------------------------------------
+
 def predict(image: Image.Image, model_key: str, top_k: int, user_force_gray: bool):
     class_names = load_class_names()
     model = load_model(model_key)
 
-    # Decide effective grayscale conversion
     force_gray_effective = user_force_gray or (AUTO_FORCE_GRAY_FOR_ROBUST and model_key == "grayscale_robust")
 
     batch = preprocess_image(image, model, force_gray_effective)
@@ -179,9 +155,6 @@ def predict(image: Image.Image, model_key: str, top_k: int, user_force_gray: boo
         meta += " (Auto-applied due to robust model)"
     return rows, label_map, probs, meta
 
-# --------------------------------------------------
-# Gradio callback
-# --------------------------------------------------
 def gr_predict(image, model_choice, top_k, force_gray):
     if image is None:
         return [], {}, None, "No image provided."
@@ -205,9 +178,6 @@ def gr_predict(image, model_choice, top_k, force_gray):
 
     return rows, label_map, fig, meta
 
-# --------------------------------------------------
-# UI
-# --------------------------------------------------
 def build_demo():
     load_class_names()
     with gr.Blocks(theme="soft") as demo:
@@ -253,13 +223,6 @@ def build_demo():
             outputs=[preds_df, label_out, status_box]
         )
 
-        gr.Markdown(
-            "### Notes\n"
-            f"* AUTO_FORCE_GRAY_FOR_ROBUST = {AUTO_FORCE_GRAY_FOR_ROBUST}\n"
-            "* 'Effective grayscale applied' shows whether the actual tensor was gray.\n"
-            "* Standard model: input kept color unless you check the box.\n"
-            "* Robust model: may auto-apply grayscale if configured.\n"
-        )
     return demo
 
 if __name__ == "__main__":
