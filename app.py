@@ -9,6 +9,9 @@ from tensorflow import keras
 from tensorflow.keras.layers import Layer
 from PIL import Image
 import gradio as gr
+import cv2
+import matplotlib.pyplot as plt
+from io import BytesIO
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CLASSMAP_JSON = os.path.join(BASE_DIR, "class_names.json")
@@ -126,7 +129,123 @@ def preprocess_image(pil_img: Image.Image, model, force_gray_effective: bool) ->
     return arr
 
 
-def predict(image: Image.Image, model_key: str, top_k: int, user_force_gray: bool):
+def generate_cam(model, image_array, class_idx, model_key):
+    """
+    Generate Class Activation Map (CAM) for the given image and class.
+    
+    Args:
+        model: The loaded Keras model
+        image_array: Preprocessed image array (1, H, W, 3)
+        class_idx: Index of the class to generate CAM for
+        model_key: Key identifying which model is being used
+        
+    Returns:
+        cam_image: PIL Image with CAM overlay
+    """
+    try:
+        # Check if model is a TFModelWrapper
+        is_wrapper = hasattr(model, 'model')
+        
+        if is_wrapper:
+            # For wrapped models, we'll use GradCAM approach
+            print("[INFO] Using GradCAM for wrapped model")
+            
+            # Load the actual Keras model to get layer access
+            cfg = MODEL_CONFIGS[model_key]
+            path = cfg["path"]
+            try:
+                keras_model = keras.models.load_model(path, compile=False)
+            except:
+                print("[WARN] Cannot generate CAM for this model type")
+                return None
+            
+            grad_model = keras_model
+        else:
+            grad_model = model
+        
+        # Find the last convolutional layer
+        conv_layer = None
+        for layer in reversed(grad_model.layers):
+            if 'conv' in layer.name.lower() or isinstance(layer, keras.layers.Conv2D):
+                conv_layer = layer
+                break
+        
+        if conv_layer is None:
+            # Try to find top_conv layer in EfficientNet
+            for layer in reversed(grad_model.layers):
+                if 'top_conv' in layer.name or 'block7' in layer.name or 'block6' in layer.name:
+                    conv_layer = layer
+                    break
+        
+        if conv_layer is None:
+            print("[WARN] No convolutional layer found for CAM")
+            return None
+        
+        print(f"[INFO] Using layer '{conv_layer.name}' for CAM")
+        
+        # Create a model that outputs both the conv layer output and predictions
+        grad_model_cam = keras.models.Model(
+            inputs=grad_model.inputs,
+            outputs=[grad_model.get_layer(conv_layer.name).output, grad_model.output]
+        )
+        
+        # Get the gradient of the predicted class with respect to the conv layer
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model_cam(image_array, training=False)
+            loss = predictions[:, class_idx]
+        
+        # Calculate gradients
+        grads = tape.gradient(loss, conv_outputs)
+        
+        # Global average pooling of gradients
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        
+        # Weight the conv outputs by the gradients
+        conv_outputs = conv_outputs[0]
+        pooled_grads = pooled_grads.numpy()
+        conv_outputs = conv_outputs.numpy()
+        
+        for i in range(pooled_grads.shape[0]):
+            conv_outputs[:, :, i] *= pooled_grads[i]
+        
+        # Create the heatmap
+        heatmap = np.mean(conv_outputs, axis=-1)
+        heatmap = np.maximum(heatmap, 0)  # ReLU
+        if np.max(heatmap) != 0:
+            heatmap /= np.max(heatmap)  # Normalize
+        
+        # Resize heatmap to match input image size
+        img_h = image_array.shape[1]
+        img_w = image_array.shape[2]
+        heatmap_resized = cv2.resize(heatmap, (img_w, img_h))
+        
+        # Apply colormap
+        heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
+        heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+        
+        # Denormalize the original image
+        img_denorm = image_array[0].copy()
+        # Reverse EfficientNet preprocessing
+        img_denorm = img_denorm / 2.0 + 0.5  # Approximate denormalization
+        img_denorm = np.clip(img_denorm * 255, 0, 255).astype(np.uint8)
+        
+        # Overlay heatmap on original image
+        alpha = 0.4
+        cam_image = cv2.addWeighted(heatmap_colored, alpha, img_denorm, 1 - alpha, 0)
+        
+        # Convert to PIL Image
+        cam_pil = Image.fromarray(cam_image)
+        
+        return cam_pil
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to generate CAM: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def predict(image: Image.Image, model_key: str, top_k: int, user_force_gray: bool, generate_cam_vis: bool = False):
     class_names = load_class_names()
     model = load_model(model_key)
 
@@ -153,12 +272,19 @@ def predict(image: Image.Image, model_key: str, top_k: int, user_force_gray: boo
     )
     if AUTO_FORCE_GRAY_FOR_ROBUST and model_key == "grayscale_robust" and not user_force_gray:
         meta += " (Auto-applied due to robust model)"
-    return rows, label_map, probs, meta
+    
+    # Generate CAM if requested
+    cam_image = None
+    if generate_cam_vis and len(idxs) > 0:
+        top_class_idx = idxs[0]  # Generate CAM for top prediction
+        cam_image = generate_cam(model, batch, top_class_idx, model_key)
+    
+    return rows, label_map, probs, meta, cam_image
 
-def gr_predict(image, model_choice, top_k, force_gray):
+def gr_predict(image, model_choice, top_k, force_gray, show_cam):
     if image is None:
-        return [], {}, None, "No image provided."
-    rows, label_map, _, meta = predict(image, model_choice, top_k, force_gray)
+        return [], {}, None, "No image provided.", None
+    rows, label_map, _, meta, cam_image = predict(image, model_choice, top_k, force_gray, show_cam)
 
     fig = None
     try:
@@ -176,7 +302,7 @@ def gr_predict(image, model_choice, top_k, force_gray):
     except Exception:
         pass
 
-    return rows, label_map, fig, meta
+    return rows, label_map, fig, meta, cam_image
 
 def build_demo():
     load_class_names()
@@ -184,7 +310,8 @@ def build_demo():
         gr.Markdown(
             "# 🍜 Chinese Food Classifier (B3 Models)\n"
             "Switch between the standard and grayscale-robust EfficientNet-B3 models. "
-            "You can manually force grayscale or rely on auto-application for the robust model."
+            "You can manually force grayscale or rely on auto-application for the robust model.\n\n"
+            "**New:** Enable CAM visualization to see which parts of the image the model focuses on!"
         )
         with gr.Row():
             with gr.Column(scale=1):
@@ -199,6 +326,11 @@ def build_demo():
                     label="Force convert input to grayscale",
                     value=False
                 )
+                show_cam = gr.Checkbox(
+                    label="Show CAM Visualization",
+                    value=True,
+                    info="Display Class Activation Map for top prediction"
+                )
                 predict_btn = gr.Button("Predict", variant="primary")
                 status_box = gr.Markdown("")
             image_in = gr.Image(
@@ -209,18 +341,28 @@ def build_demo():
             )
 
         gr.Markdown("### Results")
-        preds_df = gr.Dataframe(
-            headers=["rank", "class_name", "probability"],
-            datatype=["number", "str", "number"],
-            interactive=False,
-            label="Top-K Predictions"
-        )
-        label_out = gr.Label(label="(Mapping of Top-K)")
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                preds_df = gr.Dataframe(
+                    headers=["rank", "class_name", "probability"],
+                    datatype=["number", "str", "number"],
+                    interactive=False,
+                    label="Top-K Predictions"
+                )
+                label_out = gr.Label(label="(Mapping of Top-K)")
+            
+            with gr.Column(scale=1):
+                cam_output = gr.Image(
+                    label="CAM Visualization (Top Prediction)",
+                    type="pil",
+                    interactive=False
+                )
 
         predict_btn.click(
             fn=gr_predict,
-            inputs=[image_in, model_choice, topk_in, force_gray],
-            outputs=[preds_df, label_out, status_box]
+            inputs=[image_in, model_choice, topk_in, force_gray, show_cam],
+            outputs=[preds_df, label_out, status_box, cam_output]
         )
 
     return demo
