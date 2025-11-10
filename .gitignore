@@ -1,0 +1,18 @@
+# === ENVIRONMENTS & CACHE ===
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.bak
+
+# === SYSTEM FILES ===
+.DS_Store
+Thumbs.db
+
+# === JUPYTER CHECKPOINTS ===
+*.ipynb_checkpoints/
