@@ -16,3 +16,9 @@ Thumbs.db
 
 # === JUPYTER CHECKPOINTS ===
 *.ipynb_checkpoints/
+
+data_yolo*/
+data_clean/**/images/
+dataset_split/**/images/
+runs/
+tuned_runs/
