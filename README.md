@@ -1,15 +1,20 @@
 # Food Classifier
 
-A computer vision model for classifying food images using EfficientNet, built with TensorFlow/Keras. The main models used in this project are the EfficientNet-B3 TensorFlow models, with baseline B0 models included.
+A computer vision model for detecting and classifying food images using EfficientNet and YOLOv8. The main models used in this project are the EfficientNet-B3 TensorFlow models, with baseline B0 models included.
 
 ## Features
 
+### Food Classfication
 - Built on **EfficientNet-B3** backbone
 - Supports both color and grayscale inputs
 - Interactive Hugging Face Space for quick model testing in your browser
 - Includes confusion matrices, accuracy plots, and metrics.
 - Can be fine-tuned on other food datasets
 
+### Food Detection
+- Fine tuned YOLOv8 detection model for identifying multiple food items in a single image
+- Supports bounding box visualization
+- Trained on annotated food datasets
 
 ## Project Structure
 ```
@@ -24,8 +29,8 @@ food_classifier/
 ├── app.py                                          # Hugging Face web application
 ├── class_names.json                                # JSON file mapping class indices to food labels
 ├── efficientnet_backbone_pruned.png                # Visualization of the pruned EfficientNet backbone
-├── food_classifier.ipynb                           # 
-├── food_classifier_2.ipynb                         # Primary Jupyter notebook for training/evaluation
+├── food_classifier.ipynb                           # Primary Jupyter notebook for training/evaluation of food classification
+├── food_detection.ipynb                            # Primary Jupyter notebook for training/evaluation of food detection
 ├── food_efficientnet_b0.keras                      # Trained EfficientNet-B0 model
 ├── food_efficientnet_b0_grayscale_robust.keras     # Grayscale-robust EfficientNet-B0 model
 ├── food_efficientnet_b3.keras                      # Trained EfficientNet-B3 model
