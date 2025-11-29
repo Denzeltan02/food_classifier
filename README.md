@@ -7,7 +7,6 @@ A computer vision model for detecting and classifying food images using Efficien
 ### Food Classfication
 - Built on **EfficientNet-B3** backbone
 - Supports both color and grayscale inputs
-- Interactive Hugging Face Space for quick model testing in your browser
 - Includes confusion matrices, accuracy plots, and metrics.
 - Can be fine-tuned on other food datasets
 
@@ -15,6 +14,11 @@ A computer vision model for detecting and classifying food images using Efficien
 - Fine tuned YOLOv8 detection model for identifying multiple food items in a single image
 - Supports bounding box visualization
 - Trained on annotated food datasets
+
+### Hugging Face
+- Interactive Hugging Face Space for quick model testing in your browser
+- Supports image drag and drop
+- Supports real time detection and classification
 
 ## Project Structure
 ```
