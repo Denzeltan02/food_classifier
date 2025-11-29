@@ -41,15 +41,8 @@ food_classifier/
 │       |   └── results.png         # training curves
 │       |
 |       ├── compare_yolov8s_dishdet/# YOLOv8-s comparison experiment
-|       |   ├── weights/
-|       |   ├── results.csv
-│       |   └── results.png
-|       |
 |       └── train_dishdet_multi3/   # Final chosen YOLOv8n dish detection model
-|           ├── weights/
-|           ├── results.csv
-│           └── results.png
-│
+|
 ├── data_clean/                     # Cleaned classification dataset
 │   ├── train/                      # Training images (20 food classes)
 │   ├── val/                        # Validation images
