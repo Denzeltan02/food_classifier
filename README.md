@@ -19,24 +19,37 @@ A computer vision model for detecting and classifying food images using Efficien
 ## Project Structure
 ```
 food_classifier/
-├── .ipynb_checkpoints/                             # Jupyter notebook checkpoint folder
-├── artifacts/                                      # Saved model weights, logs, configs, etc.
-├── dataset_split/                                  # Dataset partitions for training, validation, and testing
-├── food_efficientnet_b3.tf                         # TF version of EfficientNet-B3 model
-├── food_efficientnet_b3_grayscale_robust_tf        # TF version of grayscale-robust EfficientNet-B3
-├── smaller_dataset/                                # Reduced-size dataset for quicker experiments
-├── .gitattributes                                  # Git attributes for repository configuration
-├── app.py                                          # Hugging Face web application
-├── class_names.json                                # JSON file mapping class indices to food labels
-├── efficientnet_backbone_pruned.png                # Visualization of the pruned EfficientNet backbone
-├── food_classifier.ipynb                           # Primary Jupyter notebook for training/evaluation of food classification
-├── food_detection.ipynb                            # Primary Jupyter notebook for training/evaluation of food detection
-├── food_efficientnet_b0.keras                      # Trained EfficientNet-B0 model
-├── food_efficientnet_b0_grayscale_robust.keras     # Grayscale-robust EfficientNet-B0 model
-├── food_efficientnet_b3.keras                      # Trained EfficientNet-B3 model
-├── food_efficientnet_b3_grayscale_robust.keras     # Grayscale-robust EfficientNet-B3 model
-├── food_efficientnet_b3_tuned.keras                # Tuned version of EfficientNet-B3 model
-└── requirements.txt                                # Python dependencies
+├── app.py                          # Hugging Face / Gradio web application
+├── calibration_model.keras         # Calibration model for confidence adjustment
+├── class_names.json                # JSON file mapping class indices to food labels
+├── requirements.txt                # Python dependencies
+│
+├── food_classifier.ipynb           # Notebook for training/evaluation of food classification
+├── food_detection.ipynb            # Notebook for training/evaluation of food detection
+├── data_processing.ipynb           # Data preprocessing and augmentation notebook
+├── detection_comparison.ipynb      # Comparison of detection approaches
+│
+├── models_tf/                      # TensorFlow SavedModel exports
+│   ├── food_efficientnet_b3/       # EfficientNet-B3 (color) SavedModel
+│   └── food_efficientnet_b3_grayft/# EfficientNet-B3 (grayscale fine-tuned) SavedModel
+│
+├── runs/                           # YOLO training runs and weights
+│   └── detect/                     # Detection model checkpoints (best.pt)
+│
+├── data_clean/                     # Cleaned classification dataset
+│   ├── train/                      # Training images (20 food classes)
+│   ├── val/                        # Validation images
+│   ├── test/                       # Test images
+│   ├── prediction/                 # Sample images for inference demos
+│   └── manifest.csv                # Dataset manifest file
+│
+├── data_yolo_dish/                 # YOLO-format detection dataset
+│   ├── train/                      # Training images + labels
+│   ├── valid/                      # Validation images + labels
+│   ├── test/                       # Test images + labels
+│   └── data.yaml                   # YOLO dataset configuration
+│
+└── smaller_dataset/                # Reduced dataset for quick experiments
 ```
 
 ## Installation
