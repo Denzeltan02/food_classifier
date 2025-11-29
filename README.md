@@ -1,6 +1,6 @@
-# Food Classifier
+# Food Detection and Classification
 
-A computer vision model for detecting and classifying food images using EfficientNet and YOLOv8. The main models used in this project are the EfficientNet-B3 TensorFlow models, with baseline B0 models included.
+A computer vision model for detecting and classifying food images using EfficientNet and YOLOv8. The main models used in this project are the EfficientNet-B3 TensorFlow models, with baseline B0 models included and weights trained from YOLOv8.
 
 ## Features
 
@@ -64,7 +64,7 @@ food_classifier/
 Clone the repository and install the required dependencies:
 
 ```bash
-git clone https://github.com/yourusername/food_classifier.git
+git clone https://github.com/Denzeltan02/food_classifier.git
 cd food_classifier
 pip install -r requirements.txt
 ```
