@@ -9,7 +9,9 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.layers import Layer
-from PIL import Image
+import cv2
+from PIL import ImageFont, ImageDraw, Image
+from ultralytics import YOLO
 import gradio as gr
 
 # --------------------------------------------------
@@ -41,15 +43,195 @@ AUTO_FORCE_GRAY_FOR_ROBUST = False
 MODEL_CONFIGS = {
     "standard": {
         "label": "EfficientNet-B3 (Color)",
-        "path": os.path.join(BASE_DIR, "food_efficientnet_b3.tf"),
+        "path": os.path.join(BASE_DIR, "food_efficientnet_b3"),
         "note": "Latest B3 color model."
     },
     "grayscale_robust": {
         "label": "EfficientNet-B3 Grayscale-Robust",
-        "path": os.path.join(BASE_DIR, "food_efficientnet_b3_grayscale_robust_tf"),
+        "path": os.path.join(BASE_DIR, "food_efficientnet_b3_grayft"),
         "note": "B3 model trained with grayscale augmentation."
     }
 }
+
+_yolo_model = None
+CONF_THRESHOLD = 0.7
+imgsz = 768
+FONT = ImageFont.load_default()  # fallback font
+pt = "best.pt"
+det_model = YOLO(str(pt))
+print("[DEBUG] using model file:", det_model.ckpt_path)
+
+def resize_to_342(img_rgb):
+    return cv2.resize(img_rgb, (CLF_SIZE, CLF_SIZE), interpolation=cv2.INTER_LINEAR)
+
+def preprocess_for_clf(img_rgb):
+    x = resize_to_342(img_rgb).astype(np.float32)
+    x = np.expand_dims(x, axis=0)
+    return tf.keras.applications.efficientnet.preprocess_input(x)
+
+def crop_with_pad(img_rgb, xyxy, pad=0.10):
+    H, W = img_rgb.shape[:2]
+    x1, y1, x2, y2 = map(float, xyxy)
+    cx, cy = (x1+x2)/2, (y1+y2)/2
+    bw, bh = (x2-x1)*(1+pad), (y2-y1)*(1+pad)
+    x1n, y1n = int(max(0, cx-bw/2)), int(max(0, cy-bh/2))
+    x2n, y2n = int(min(W-1, cx+bw/2)), int(min(H-1, cy+bh/2))
+    if y2n <= y1n or x2n <= x1n:
+        return None, (x1n, y1n, x2n, y2n)
+    return img_rgb[y1n:y2n, x1n:x2n].copy(), (x1n, y1n, x2n, y2n)
+
+def draw_box(img_pil, box, label, color=(0, 140, 255)):
+    draw = ImageDraw.Draw(img_pil)
+    x1, y1, x2, y2 = [int(v) for v in box]
+    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+    tw, th = draw.textbbox((0,0), label, font=FONT)[2:4]
+    draw.rectangle([x1, y1-th-6, x1+tw+8, y1], fill=color)
+    draw.text((x1+4, y1-th-4), label, font=FONT, fill=(255,255,255))
+    return img_pil
+
+def _as_probs(out):
+    if isinstance(out, dict):
+        return next(iter(out.values()))
+    return out
+
+CLF_SIZE = 342
+DET_CONF = 0.35
+DET_IOU  = 0.5
+
+def resize_to_342(img_rgb):
+    return cv2.resize(img_rgb, (CLF_SIZE, CLF_SIZE), interpolation=cv2.INTER_LINEAR)
+
+def preprocess_for_clf(img_rgb):
+    x = resize_to_342(img_rgb).astype(np.float32)
+    return x[None, ...]
+
+def crop_with_pad(img_rgb, xyxy, pad=0.10):
+    H, W = img_rgb.shape[:2]
+    x1, y1, x2, y2 = map(float, xyxy)
+    cx, cy = (x1+x2)/2, (y1+y2)/2
+    bw, bh = (x2-x1), (y2-y1)
+    bw *= (1+pad); bh *= (1+pad)
+    x1n, y1n = int(max(0, cx-bw/2)), int(max(0, cy-bh/2))
+    x2n, y2n = int(min(W-1, cx+bw/2)), int(min(H-1, cy+bh/2))
+    if y2n <= y1n or x2n <= x1n:
+        return None, (x1n, y1n, x2n, y2n)
+    return img_rgb[y1n:y2n, x1n:x2n].copy(), (x1n, y1n, x2n, y2n)
+
+def draw_box(img_pil, box, label, color=(0, 140, 255)):
+    draw = ImageDraw.Draw(img_pil)
+    x1, y1, x2, y2 = [int(v) for v in box]
+    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+    tw, th = draw.textbbox((0,0), label, font=FONT)[2:]
+    draw.rectangle([x1, y1-th-6, x1+tw+8, y1], fill=color)
+    draw.text((x1+4, y1-th-4), label, font=FONT, fill=(255,255,255))
+    return img_pil
+
+def _as_probs(out):
+    if isinstance(out, dict):
+        return next(iter(out.values()))
+    return out
+
+def detect_and_classify(image_like, clf_model, min_box_area=4000, keep_topk=20):
+    """
+    Run YOLO detection on the image and classify each detected crop using clf_model.
+    Returns:
+        - detections: list of dicts with box, class, score
+        - pil image with bounding boxes drawn
+    """
+    CLASS_NAMES = load_class_names()
+
+    # -----------------------------
+    # 1. Convert input to RGB NumPy
+    # -----------------------------
+    if isinstance(image_like, Image.Image):
+        rgb = np.array(image_like.convert("RGB"))
+    elif isinstance(image_like, np.ndarray):
+        if image_like.shape[2] == 3:
+            rgb = image_like
+        else:
+            raise ValueError("Expected 3-channel RGB array.")
+    else:
+        bgr = cv2.imread(str(image_like))
+        if bgr is None:
+            raise ValueError(f"Cannot read image: {image_like}")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+    # -----------------------------
+    # 2. YOLO detection
+    # -----------------------------
+    res = det_model.predict(
+        source=rgb,
+        conf=DET_CONF,
+        iou=DET_IOU,
+        verbose=False
+    )[0]
+
+    boxes = res.boxes
+    if boxes is None or len(boxes) == 0:
+        return [], Image.fromarray(rgb)
+
+    xyxy = boxes.xyxy.cpu().numpy()
+
+    # -----------------------------
+    # 3. Sort/filter by area
+    # -----------------------------
+    areas = (xyxy[:,2]-xyxy[:,0]) * (xyxy[:,3]-xyxy[:,1])
+    order = np.argsort(-areas)
+    keep = [i for i in order if areas[i] >= min_box_area][:keep_topk]
+
+    pil = Image.fromarray(rgb)
+    detections = []
+
+    # -----------------------------
+    # 4. Classification
+    # -----------------------------
+    for i in keep:
+
+        # NEW → YOLO detection confidence
+        yolo_conf = float(boxes.conf[i].cpu().numpy())
+
+        crop, box = crop_with_pad(rgb, xyxy[i], pad=0.10)
+        if crop is None:
+            continue
+
+        x = preprocess_for_clf(crop)
+        out = clf_model.predict(x, verbose=0)
+        probs = np.array(_as_probs(out))
+
+        if probs.ndim == 1:
+            probs = probs[None, ...]
+        if probs.shape[-1] != len(CLASS_NAMES):
+            probs = tf.nn.softmax(probs, axis=-1).numpy()
+
+        p = probs[0]
+        cls_id = int(np.argmax(p))
+        score = float(p[cls_id])
+        name = CLASS_NAMES[cls_id]
+
+        if score < CONF_THRESHOLD:
+            name = "Unknown Dish"
+            cls_id = -1
+
+        label = f"{name} {score:.2f}"
+        color = (255, 0, 0) if name == "Unknown Dish" else (0, 140, 255)
+
+        pil = draw_box(pil, box, label, color=color)
+
+        detections.append({
+            "box_xyxy": tuple(map(int, box)),
+            "cls_id": cls_id,
+            "cls_name": name,
+            "score": score,         # classifier confidence
+            "det_conf": yolo_conf   # NEW: detection confidence
+        })
+
+    return detections, pil
+
+
+
+
+
+
 
 # --------------------------------------------------
 # Stub for RandomGrayscale (identity)
@@ -108,40 +290,45 @@ def load_model(key: str):
                 custom_objects={"RandomGrayscale": RandomGrayscale}
             )
             print(f"[INFO] Loaded Keras model '{key}' from {path}")
-        except Exception:
-            print(f"[WARN] Keras metadata missing for '{key}', using tf.saved_model.load instead.")
+            # EXTRA safety check: ensure this is really a Keras model
+            if not hasattr(model, "predict"):
+                raise ValueError("Loaded model lacks Keras API, falling back.")
+        except Exception as e:
+            print(f"[WARN] Keras load failed ({e}), using tf.saved_model.load instead.")
             imported = tf.saved_model.load(path)
-
+        
             class TFModelWrapper:
                 def __init__(self, imported):
-                    sig = imported.signatures['serving_default']
-                    self._func = sig
-                    self._imported = imported  # Keep reference to prevent garbage collection
+                    self.imported = imported
+                    self.sig = imported.signatures["serving_default"]
+        
+                    self.is_saved_model = True
+                    self._func = self.sig
+        
+                    self.input_name = list(self.sig.structured_input_signature[1].keys())[0]
+        
+                    # Detect real input shape from SavedModel signature
+                    tensor_spec = list(self.sig.structured_input_signature[1].values())[0]
+                    self.input_shape = tensor_spec.shape
+                    self.inputs = [tensor_spec]
                     
-                    # Get input name from signature
-                    self.input_names = list(sig.structured_input_signature[1].keys())
-                    self.input_name = self.input_names[0] if self.input_names else None
-                    
-                    self.inputs = [tf.TensorSpec(shape=[None] + list(sig.inputs[0].shape[1:]), dtype=tf.float32)]
-                    self.outputs = [tf.TensorSpec(shape=[None] + list(sig.outputs[0].shape[1:]), dtype=tf.float32)]
-                    
-                    print(f"[INFO] SavedModel input name: {self.input_name}")
-
+                    # Extract H,W
+                    self.model_h = tensor_spec.shape[1]
+                    self.model_w = tensor_spec.shape[2]
+        
                 def __call__(self, x, training=False):
                     if not isinstance(x, tf.Tensor):
                         x = tf.convert_to_tensor(x, dtype=tf.float32)
-                    
-                    # Call with keyword argument using the correct input name
-                    if self.input_name:
-                        out_dict = self._func(**{self.input_name: x})
-                    else:
-                        out_dict = self._func(x)
-                    
-                    first_key = next(iter(out_dict.keys()))
-                    return out_dict[first_key]
+                    out = self._func(**{self.input_name: x})
+                    first_key = next(iter(out.keys()))
+                    return out[first_key]
 
+                def predict(self, x, verbose=0):
+                    return self.__call__(x)
+        
             model = TFModelWrapper(imported)
             print(f"[INFO] Loaded TF SavedModel '{key}' from {path}")
+
 
         _model_cache[key] = model
         return model
@@ -171,11 +358,17 @@ def preprocess_image(pil_img: Image.Image, model, force_gray_effective: bool) ->
         g = pil_img.convert("L")
         pil_img = Image.merge("RGB", (g, g, g))
 
-    model_h = model.inputs[0].shape[1]
-    model_w = model.inputs[0].shape[2]
-    if model_h is None or model_w is None:
+    # --- SAFE input size detection ---
+    try:
+        model_h = model.inputs[0].shape[1]
+        model_w = model.inputs[0].shape[2]
+        if model_h is None or model_w is None:
+            raise ValueError("Invalid shape")
+    except Exception:
+        # TF SavedModel wrapper: no .inputs → default EfficientNet size
         model_h = model_w = 224
 
+    # --- Resize logic ---
     if (model_h, model_w) == (224, 224):
         if pil_img.size != (INTERMEDIATE_RESIZE, INTERMEDIATE_RESIZE):
             pil_img = pil_img.resize((INTERMEDIATE_RESIZE, INTERMEDIATE_RESIZE), Image.BILINEAR)
@@ -190,12 +383,15 @@ def preprocess_image(pil_img: Image.Image, model, force_gray_effective: bool) ->
     arr = np.expand_dims(arr, axis=0)
     arr = keras.applications.efficientnet.preprocess_input(arr)
     return arr
+
+ 
+
 def generate_gradcam(model, img_array, class_idx, last_conv_layer_name=None):
     """
     Generate Grad-CAM heatmap. Falls back to saliency/occlusion for SavedModels.
     """
     # Handle TF SavedModel wrapper
-    if hasattr(model, '_func'):
+    if getattr(model, "is_saved_model", False):
         print("[INFO] Using saliency map for SavedModel (Grad-CAM not available)")
         return generate_saliency_map(model, img_array, class_idx)
     
@@ -431,9 +627,16 @@ def overlay_heatmap_on_image(pil_img, heatmap, alpha=0.5, colormap='jet'):
 # Prediction
 # --------------------------------------------------
 def predict(image_like, model_key: str, top_k: int, user_force_gray: bool, show_cam: bool = True):
+
     class_names = load_class_names()
     model = load_model(model_key)
     force_gray_effective = user_force_gray or (AUTO_FORCE_GRAY_FOR_ROBUST and model_key == "grayscale_robust")
+
+    print("Model type:", type(model))
+    print("Has layers:", hasattr(model, "layers"))
+    if hasattr(model, "layers"):
+        for l in model.layers:
+            print(l.name, l.output_shape)
 
     pil_img = _ensure_pil(image_like)
     if pil_img is None:
@@ -468,23 +671,37 @@ def predict(image_like, model_key: str, top_k: int, user_force_gray: bool, show_
 
     # Generate CAM/Saliency visualization
     cam_image = None
+    cam_heatmap = None   # <- new: raw heatmap (normalized float array)
     if show_cam:
         try:
             top_class_idx = idxs[0]
             top_class_name = class_names[top_class_idx]
             print(f"[INFO] Generating visualization for: {top_class_name} (prob: {probs[top_class_idx]:.4f})")
-            
-            heatmap = generate_gradcam(model, batch, top_class_idx)
-            
+        
+            # Attempt Grad-CAM; fallback to saliency map automatically
+            heatmap = None
+            try:
+                heatmap = generate_gradcam(model, batch, top_class_idx)
+            except Exception as e:
+                print(f"[WARN] Grad-CAM failed: {e}")
+    
+            if heatmap is None:
+                print("[INFO] Falling back to saliency map...")
+                heatmap = generate_saliency_map(model, batch, top_class_idx)
+    
             if heatmap is not None:
+                # keep a copy of the raw normalized heatmap
+                cam_heatmap = heatmap.copy() if isinstance(heatmap, np.ndarray) else np.array(heatmap)
+    
+                # blended PIL for single-crop display (unchanged)
                 cam_image = overlay_heatmap_on_image(pil_img, heatmap, alpha=0.5)
                 if cam_image is not None:
                     print("[INFO] ✓ Visualization generated successfully")
                 else:
                     print("[WARN] ✗ Overlay failed")
             else:
-                print("[WARN] ✗ Heatmap generation failed")
-                
+                print("[WARN] ✗ Heatmap generation failed completely")
+    
         except Exception as e:
             print(f"[ERROR] Visualization failed: {e}")
             import traceback
@@ -507,76 +724,246 @@ def predict(image_like, model_key: str, top_k: int, user_force_gray: bool, show_
     except Exception:
         pass
 
-    return rows, label_map, fig, meta, cam_image
+    return rows, label_map, fig, meta, cam_image, cam_heatmap
 # --------------------------------------------------
 # Gradio callback
 # --------------------------------------------------
-def gr_predict(image, model_choice, top_k, force_gray, show_cam):
-    return predict(image, model_choice, top_k, force_gray, show_cam)
+def gr_predict_dynamic(image, model_choice, top_k, force_gray, show_cam):
+    clf_model = load_model(model_choice)
+    table_list = []
+
+    try:
+        detections, yolo_image = detect_and_classify(image, clf_model)
+    except Exception as e:
+        print(f"[WARN] YOLO detection failed: {e}")
+        detections = []
+        yolo_image = _ensure_pil(image)
+
+    all_tables = []   # <-- collect each table separately
+    
+    combined_heatmap = np.zeros((yolo_image.height, yolo_image.width), dtype=np.float32)
+
+    for i, det in enumerate(detections):
+        cls_name = det.get("cls_name", f"Dish {i+1}")
+        box = det.get("box_xyxy")
+        det_conf = det.get("det_conf", None)  # <- get YOLO detection confidence
+
+        if cls_name.lower() == "unknown dish" or box is None:
+            continue
+
+        x1, y1, x2, y2 = map(int, box)
+        crop, _ = crop_with_pad(np.array(yolo_image), box, pad=0.10)
+        if crop is None:
+            continue
+            
+        rows, label_map, fig, meta, cam_crop, cam_crop_heatmap = predict(
+            crop, model_choice, top_k, force_gray, show_cam
+        )
+        
+        # Use the raw heatmap (cam_crop_heatmap) if available.
+        if cam_crop_heatmap is not None:
+            # cam_crop_heatmap is a small 2D array (normalized floats). Resize it to bbox size.
+            from PIL import Image as PILImage
+            heat_pil = PILImage.fromarray((cam_crop_heatmap * 255).astype(np.uint8))
+            heat_resized = heat_pil.resize((x2 - x1, y2 - y1), PILImage.BILINEAR)
+            cam_crop_array = np.array(heat_resized).astype(np.float32) / 255.0
+        
+            # Merge into the full heatmap (use max to preserve strongest response)
+            combined_heatmap[y1:y2, x1:x2] = np.maximum(
+                combined_heatmap[y1:y2, x1:x2], cam_crop_array
+            )
+
+        # Build markdown table for this single detection
+        table_md = ""
+        
+        # Add YOLO detection confidence above the table
+        if det_conf is not None:
+            table_md += f"**YOLO Detection Confidence:** {det_conf:.2f}\n\n"
+        
+        # Add table header
+        table_md += "| Rank | Class | Probability |\n|------|-------|------------|\n"
+        
+        # Add the classifier probabilities
+        for r in rows:
+            table_md += f"| {r[0]} | {r[1]} | {r[2]:.4f} |\n"
+        
+        full_md = f"### {cls_name} (Box {i+1})\n{table_md}\n"
+        all_tables.append(full_md)
+
+    # If nothing detected
+    if not all_tables:
+        all_tables = ["No recognized dishes detected."]
+
+    # ---- NEW: SPLIT INTO TWO COLUMNS ----
+    left_col = []
+    right_col = []
+
+    for idx, table in enumerate(all_tables):
+        if idx % 2 == 0:
+            left_col.append(table)
+        else:
+            right_col.append(table)
+
+    left_md = "\n\n".join(left_col)
+    right_md = "\n\n".join(right_col)
+
+    clean_yolo = _ensure_pil(image).copy()
+    clean_yolo = clean_yolo.resize(yolo_image.size)   # ensure same size
+    combined_cam_image = overlay_heatmap_on_image(clean_yolo, combined_heatmap, alpha=0.5)
+
+    # ---- UPDATED RETURN (must be 4 things) ----
+    return left_md, right_md, combined_cam_image, yolo_image
+
+
+
+
+def live_predict(image, model_choice, top_k, force_gray, show_cam):
+    """
+    Real-time frame prediction: YOLO + classification.
+    Returns:
+        - yolo_image with boxes and class labels
+    """
+    clf_model = load_model(model_choice)
+    
+    try:
+        detections, yolo_image = detect_and_classify(image, clf_model)
+    except Exception as e:
+        print(f"[WARN] YOLO detection failed: {e}")
+        yolo_image = _ensure_pil(image)
+        return yolo_image
+
+    # Overlay class names on boxes
+    from PIL import ImageDraw, ImageFont
+    draw = ImageDraw.Draw(yolo_image)
+    
+    try:
+        font = ImageFont.truetype("arial.ttf", 16)
+    except:
+        font = None  # fallback default
+    
+    for det in detections:
+        cls_name = det.get("cls_name", "Dish")
+        box = det.get("box_xyxy")
+        if box is None:
+            continue
+        x1, y1, x2, y2 = map(int, box)
+        
+        # Choose color: blue if predicted class is known, red otherwise
+        color = "blue" if cls_name.lower() != "unknown dish" else "red"
+        
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+        draw.text((x1, y1-16), cls_name, fill=color, font=font)
+    
+    return yolo_image
+
+
+
+
 
 # --------------------------------------------------
-# UI
+# Build the Gradio Demo
+# --------------------------------------------------
+import gradio as gr
+import numpy as np
+from PIL import Image
+
+# --------------------------------------------------
+# Helper / prediction functions (simplified references)
+# --------------------------------------------------
+# Make sure you have your own implementations for:
+# load_class_names(), load_model(), detect_and_classify(), crop_with_pad(), predict()
+# --------------------------------------------------
+
+
+
+
+# --------------------------------------------------
+# Gradio Demo
 # --------------------------------------------------
 def build_demo():
     load_class_names()
     with gr.Blocks(theme="soft") as demo:
-        gr.Markdown("# 🍜 Chinese Food Classifier (B3 Models)\n")
+        gr.Markdown("# 🍜 Chinese Food Classifier + YOLO Detection")
 
         with gr.Tabs():
-            # Upload or snapshot
+            # ==========================================================
+            # TAB 1 — UPLOAD OR SNAPSHOT
+            # ==========================================================
             with gr.Tab("Upload or Snapshot"):
+                # ---------------------------
+                # ROW 1 — MODEL SELECTION
+                # ---------------------------
                 with gr.Row():
                     with gr.Column(scale=1):
                         model_choice = gr.Radio(
                             choices=list(MODEL_CONFIGS.keys()),
                             value="standard",
-                            label="Model Variant"
+                            label="Classifier Model"
                         )
                         topk_in = gr.Slider(1, 10, value=5, step=1, label="Top-K")
-                        force_gray = gr.Checkbox(label="Force convert to grayscale", value=False)
-                        show_cam = gr.Checkbox(label="Show CAM visualization", value=True)  # NEW
-                        predict_btn = gr.Button("Predict", variant="primary")
+                        force_gray = gr.Checkbox(label="Force grayscale", value=False)
+                        show_cam = gr.Checkbox(label="Show CAM", value=True)
                         status_box = gr.Markdown("")
-                    
+
+                # ---------------------------
+                # ROW 2 — IMAGE UPLOAD
+                # ---------------------------
+                with gr.Row():
                     with gr.Column(scale=1):
                         image_in = gr.Image(
                             label="Upload or Webcam Snapshot",
                             type="pil",
                             image_mode="RGB",
-                            height=320,
+                            height=350,
                             sources=["upload", "webcam"]
                         )
-                        cam_image_out = gr.Image(label="CAM Visualization", height=320)  # NEW
+                        predict_btn = gr.Button("Predict", variant="primary")
 
-                preds_df = gr.Dataframe(
-                    headers=["rank", "class_name", "probability"],
-                    datatype=["number", "str", "number"],
-                    interactive=False,
-                    label="Top-K Predictions"
-                )
-                label_out = gr.Label(label="(Mapping of Top-K)")
-                bar_plot = gr.Plot(label="Top-K Bar Chart")
+                # ---------------------------
+                # ROW 3 — YOLO + CAM OUTPUTS
+                # Labels at bottom left
+                # ---------------------------
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        cam_image_out = gr.Image(show_label=False, height=320)
+                        gr.Markdown("**CAM Visualization**")
 
+                    with gr.Column(scale=1):
+                        yolo_image_out = gr.Image(show_label=False, height=320)
+                        gr.Markdown("**YOLO Detection**")
+
+                # ---------------------------
+                # ROW 4 — Dynamic Top-K Tables (2 columns)
+                # ---------------------------
+                with gr.Row():
+                    dynamic_md_left = gr.Markdown("")
+                    dynamic_md_right = gr.Markdown("")
+
+                # ---------------------------
+                # Connect predict button
+                # ---------------------------
                 predict_btn.click(
-                    fn=gr_predict,
+                    fn=gr_predict_dynamic,
                     inputs=[image_in, model_choice, topk_in, force_gray, show_cam],
-                    outputs=[preds_df, label_out, bar_plot, status_box, cam_image_out]  # Added cam_image_out
+                    outputs=[dynamic_md_left, dynamic_md_right, cam_image_out, yolo_image_out]
                 )
 
-            # Live webcam
+            # ==========================================================
+            # TAB 2 — LIVE WEBCAM
+            # ==========================================================
             with gr.Tab("Live (Webcam)"):
                 with gr.Row():
                     with gr.Column(scale=1):
                         model_choice_live = gr.Radio(
                             choices=list(MODEL_CONFIGS.keys()),
                             value="standard",
-                            label="Model Variant (Live)"
+                            label="Model (Live)"
                         )
                         topk_live = gr.Slider(1, 10, value=5, step=1, label="Top-K (Live)")
                         force_gray_live = gr.Checkbox(label="Force grayscale (Live)", value=False)
-                        show_cam_live = gr.Checkbox(label="Show CAM (Live)", value=True)  # NEW
-                        status_box_live = gr.Markdown("Start your camera to begin streaming predictions.")
-                    
+                        show_cam_live = gr.Checkbox(label="Show CAM (Live)", value=False)
+            
+                with gr.Row():
                     with gr.Column(scale=1):
                         image_live = gr.Image(
                             label="Webcam Stream",
@@ -585,28 +972,27 @@ def build_demo():
                             image_mode="RGB",
                             height=320
                         )
-                        cam_image_live = gr.Image(label="CAM Visualization (Live)", height=320)  # NEW
+            
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        yolo_image_live = gr.Image(show_label=False, height=320)
+            
+            # Connect live webcam to the prediction function
+            image_live.stream(
+                fn=live_predict,
+                inputs=[image_live, model_choice_live, topk_live, force_gray_live, show_cam_live],
+                outputs=[yolo_image_live],
+            )
 
-                preds_df_live = gr.Dataframe(
-                    headers=["rank", "class_name", "probability"],
-                    datatype=["number", "str", "number"],
-                    interactive=False,
-                    label="Top-K Predictions (Live)"
-                )
-                label_out_live = gr.Label(label="(Mapping of Top-K, Live)")
-                bar_plot_live = gr.Plot(label="Top-K Bar Chart (Live)")
+        gr.Markdown("Tip: **Upload or Snapshot** for single image, or **Live** for continuous webcam predictions.")
 
-                image_live.stream(
-                    fn=gr_predict,
-                    inputs=[image_live, model_choice_live, topk_live, force_gray_live, show_cam_live],
-                    outputs=[preds_df_live, label_out_live, bar_plot_live, status_box_live, cam_image_live]
-                )
-
-        gr.Markdown("Tip: Use **Upload or Snapshot** for single image, or **Live** for continuous webcam predictions.")
     return demo
-# --------------------------------------------------
-# Launch
-# --------------------------------------------------
+
+
+
+
+
+# --- Launch demo ---
 demo = build_demo()
 
 if __name__ == "__main__":
