@@ -34,7 +34,21 @@ food_classifier/
 │   └── food_efficientnet_b3_grayft/# EfficientNet-B3 (grayscale fine-tuned) SavedModel
 │
 ├── runs/                           # YOLO training runs and weights
-│   └── detect/                     # Detection model checkpoints (best.pt)
+│   └── detect/                     # Detection model checkpoints
+|       ├── compare_yolo11n_dishdet/# YOLO11-n comparison experiment
+|       |   ├── weights/            # best.pt
+|       |   ├── results.csv         # metrics across epochs
+│       |   └── results.png         # training curves
+│       |
+|       ├── compare_yolov8s_dishdet/# YOLOv8-s comparison experiment
+|       |   ├── weights/
+|       |   ├── results.csv
+│       |   └── results.png
+|       |
+|       └── train_dishdet_multi3/   # Final chosen YOLOv8n dish detection model
+|           ├── weights/
+|           ├── results.csv
+│           └── results.png
 │
 ├── data_clean/                     # Cleaned classification dataset
 │   ├── train/                      # Training images (20 food classes)
